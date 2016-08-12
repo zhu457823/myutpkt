@@ -493,7 +493,7 @@ static int ut_vpncfg_check_tx_exist(struct vpncfg_node* vpnnode)
 static void ut_vpncfg_recv_msg(struct sk_buff *skb)
 {
 	struct nlmsghdr *nlh;
-	struct sk_buff *skb_out;
+	//struct sk_buff *skb_out;
 	char msg[SEND_BACK_MSG_LENGTH];
 	memset(msg, 0, SEND_BACK_MSG_LENGTH);
 
@@ -682,7 +682,7 @@ int ut_vpncfg_get_qinq(u16 vpnid, u16 l3uniid, u32 peip)
 	return 0;
 }
 
-int ut_vpncfg_get_vpninfo(u16 spvlan, u16 cevlan, u16 * l3uniid, u32 * peip, u16 * vlanaction)
+int ut_vpncfg_get_vpninfo(u16 spvlan, u16 cevlan, u16 * l3uniid, u16 * tpid, u32 * peip, u16 * vlanaction)
 {
 	struct hlist_head *bucket;
 	struct ut_vpncfg_tx_node *tx_node = NULL;
@@ -698,6 +698,7 @@ int ut_vpncfg_get_vpninfo(u16 spvlan, u16 cevlan, u16 * l3uniid, u32 * peip, u16
 			l3univlan->outtag = tx_node->outtag;
 			l3univlan->innertag = tx_node->innertag;
 			l3univlan->tpid = tx_node->tpid;*/
+            *tpid = tx_node->tpid;
             *peip = tx_node->peip;
             *vlanaction = tx_node->vlanaction;
 			rcu_read_unlock();
