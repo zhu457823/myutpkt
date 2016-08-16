@@ -9,6 +9,7 @@
 #include <linux/if_vlan.h>
 #include <linux/netfilter_bridge.h>
 #include <linux/inetdevice.h>
+#include <net/route.h>
 
 #define IPPROTO_UT 219
 #define VPNID_MASK  (0x03ff)
@@ -18,6 +19,7 @@
 char DevPort[IFNAMSIZ]={};
 int g_dbg_print_add_vlan=1;
 
+extern struct neigh_table arp_tbl;
 extern int  ut_vpncfg_init(void);
 extern void ut_vpncfg_exit(void);
 extern void get_ovs_tag(u32, u16 *, u16 *);
@@ -37,6 +39,7 @@ struct ut_qinq_vlan{
     __be16 ut_cevlan_tci;
     __be16 h_vlan_encapsulated_proto;
 };
+
 /*
 struct utpkthdr
 {
@@ -90,7 +93,10 @@ static unsigned int add_utpkt_hdr(const struct nf_hook_ops *ops,
     struct ut_qinq_vlan utqinqhdr;
     struct iphdr niph;
     struct ethhdr neth;
+    struct rtable *rt = NULL;
+    struct neighbour *n = NULL;
     int ret = 0;
+    __be32 paddr;
     u32 ovstag,peip,vpninfo;
     u16 l3uniid,spvlan,cevlan,tpid,vlanaction;
 
@@ -113,8 +119,8 @@ static unsigned int add_utpkt_hdr(const struct nf_hook_ops *ops,
     print_linear_data(skb);
 
     //ovstag = (skb->vlan_tci) & 0xfff;//从skb中获取ovstag
-    ovstag = vlan_tx_tag_get_id(skb);//从skb中获取ovstag
-    get_ovs_tag(ovstag,&spvlan,&cevlan);
+    ovstag = vlan_tx_tag_get_id(skb);//从skb中获取ovstag，利用if_vlan.h中提供宏定义表达式
+    get_ovs_tag(ovstag,&spvlan,&cevlan);//利用spvlan和cevlan与ovstag之间关系，有ovstag的值获取spvlan和cevlan的值
     ut_vpncfg_get_vpninfo(spvlan,cevlan,&l3uniid,&tpid,&peip,&vlanaction);
     vpninfo = l3uniid;
     vpninfo = vpninfo << 10;
@@ -151,7 +157,7 @@ static unsigned int add_utpkt_hdr(const struct nf_hook_ops *ops,
         niph.ihl=5;
         niph.tos=0;
         //printk(KERN_INFO"nskb->len=%d\n",nskb->len);
-        niph.tot_len=htons(nskb->len);//tot_len既ip头20字节加上数据部分长度，sk_buf的len指的就是这个长度。
+        niph.tot_len=htons(nskb->len);//tot_len既ip头20字节加上数据部分长度，sk_buff的len指的就是这个长度。
         niph.id=0;
         niph.frag_off=htons(0x4000);
         niph.ttl=64;
@@ -160,7 +166,7 @@ static unsigned int add_utpkt_hdr(const struct nf_hook_ops *ops,
         niph.saddr = nskb->dev->ip_ptr->ifa_list->ifa_address;//auto get controller ip address
         //niph.saddr = in_aton("2.2.2.2"); //controller ip address
         //niph.daddr = in_aton("2.2.2.1"); //ne ip address
-        niph.daddr = peip;   //auto get dst ne ip from ut_vpncfg_tx_node
+        niph.daddr = peip; //auto get dst ne ip from ut_vpncfg_tx_node
         niph.check = 0;//must do before ip_fast_csum
         niph.check=ip_fast_csum(&niph,niph.ihl);
         memcpy((struct iphdr *)nskb->data,&niph,sizeof(struct iphdr));
@@ -168,6 +174,32 @@ static unsigned int add_utpkt_hdr(const struct nf_hook_ops *ops,
         print_linear_data(nskb); 
         
         /*1.3-add mac-header*/
+        rt = ip_route_output(&init_net,niph.daddr,0,0,0);//查找目的ip的路由
+        if(rt == NULL)
+        {
+            printk(KERN_INFO"rtable is NULL!\n");
+        }
+        else
+        {
+            printk(KERN_INFO"rtable is not NULL!\n");
+            if(rt->rt_gateway)
+            {
+                printk(KERN_INFO"rt_gateway=%pI4\n",&rt->rt_gateway);
+            }
+        }
+        paddr = rt_nexthop(rt,niph.daddr);//查找目的路由的下一跳
+        printk(KERN_INFO"paddr=%pI4\n",&paddr);
+        n = neigh_lookup(&arp_tbl, &paddr, nskb->dev);//查找目的路由下一跳的neighbour信息
+        if(n == NULL)
+        {
+            printk(KERN_INFO"neighbour is NULL!\n");
+        }
+        else
+        {
+            printk(KERN_INFO"neighbour is not NULL!\n"); 
+            memcpy(dstmac, n->ha, ETH_ALEN);//将neighbour中下一跳对应的mac地址拷贝给dstmac
+            printk(KERN_INFO"dstmac = %pM\n",dstmac);
+        }
         skb_push(nskb,sizeof(struct ethhdr));
         memcpy((unsigned char *)neth.h_dest,dstmac,ETH_ALEN);
         memcpy((unsigned char *)neth.h_source,nskb->dev->dev_addr,ETH_ALEN);//auto get controller mac address
@@ -248,7 +280,34 @@ static unsigned int add_utpkt_hdr(const struct nf_hook_ops *ops,
         printk(KERN_INFO"1.3-add ip header to frame\n");
         print_linear_data(nskb); 
         
-        /*1.4-add mac-vlan-header*/
+        /*1.4-add mac header*/
+        rt = ip_route_output(&init_net,niph.daddr,0,0,0);//查找目的ip的路由
+        if(rt == NULL)
+        {
+            printk(KERN_INFO"rtable is NULL!\n");
+        }
+        else
+        {
+            printk(KERN_INFO"rtable is not NULL!\n");
+            if(rt->rt_gateway)
+            {
+                printk(KERN_INFO"rt_gateway=%pI4\n",&rt->rt_gateway);
+            }
+        }
+        paddr = rt_nexthop(rt,niph.daddr);//查找目的路由的下一跳
+        printk(KERN_INFO"paddr=%pI4\n",&paddr);
+        n = neigh_lookup(&arp_tbl, &paddr, nskb->dev);//查找目的路由下一跳的neighbour信息
+        if(n == NULL)
+        {
+            printk(KERN_INFO"neighbour is NULL!\n");
+        }
+        else
+        {
+            printk(KERN_INFO"neighbour is not NULL!\n"); 
+            memcpy(dstmac, n->ha, ETH_ALEN);//将neighbour中下一跳对应的mac地址拷贝给dstmac
+            printk(KERN_INFO"dstmac = %pM\n",dstmac);
+        }
+        
         skb_push(nskb,sizeof(struct ethhdr));
         memcpy((unsigned char *)neth.h_dest,dstmac,ETH_ALEN);
         memcpy((unsigned char *)neth.h_source,nskb->dev->dev_addr,ETH_ALEN);//auto get controller mac address
@@ -331,12 +390,40 @@ static unsigned int add_utpkt_hdr(const struct nf_hook_ops *ops,
         printk(KERN_INFO"1.3-add ip header to frame\n");
         print_linear_data(nskb); 
         
-        /*1.4-add mac-vlan-header*/
+        /*1.4-add mac header*/
+        rt = ip_route_output(&init_net,niph.daddr,0,0,0);//查找目的ip的路由
+        if(rt == NULL)
+        {
+            printk(KERN_INFO"rtable is NULL!\n");
+        }
+        else
+        {
+            printk(KERN_INFO"rtable is not NULL!\n");
+            if(rt->rt_gateway)
+            {
+                printk(KERN_INFO"rt_gateway=%pI4\n",&rt->rt_gateway);
+            }
+        }
+        paddr = rt_nexthop(rt,niph.daddr);//查找目的路由的下一跳
+        printk(KERN_INFO"paddr=%pI4\n",&paddr);
+        n = neigh_lookup(&arp_tbl, &paddr, nskb->dev);//查找目的路由下一跳的neighbour信息
+        if(n == NULL)
+        {
+            printk(KERN_INFO"neighbour is NULL!\n");
+        }
+        else
+        {
+            printk(KERN_INFO"neighbour is not NULL!\n"); 
+            memcpy(dstmac, n->ha, ETH_ALEN);//将neighbour中下一跳对应的mac地址拷贝给dstmac
+            printk(KERN_INFO"dstmac = %pM\n",dstmac);
+        }
+        
         skb_push(nskb,sizeof(struct ethhdr));
         memcpy((unsigned char *)neth.h_dest,dstmac,ETH_ALEN);
         memcpy((unsigned char *)neth.h_source,nskb->dev->dev_addr,ETH_ALEN);//auto get controller mac address
         neth.h_proto=htons(ETH_P_IP);
         memcpy((struct ethhdr *)nskb->data,&neth,sizeof(struct ethhdr));
+        
 
         /*reset mac header and ip header*/
         skb_reset_mac_header(nskb);
@@ -351,7 +438,7 @@ static unsigned int add_utpkt_hdr(const struct nf_hook_ops *ops,
             return NF_ACCEPT;
         }
         printk(KERN_INFO"success add header to frame:\n");    
-        print_linear_data(nskb); 
+        print_linear_data(nskb);
         return NF_DROP;       
     }
     return NF_DROP;
@@ -369,7 +456,7 @@ unsigned int rm_utpkt_hdr(unsigned int hooknum,
     struct ethhdr *eth = eth_hdr(skb);
     struct vlan_ethhdr vethhdr;
     struct sk_buff *nskb = NULL;
-    struct ut_vlan * next_vlan = NULL;
+    struct ut_vlan *next_vlan = NULL;
     int ret = 0;
     u32 vpninfo;
     u16 vpnid,l3uniid;
@@ -406,11 +493,11 @@ unsigned int rm_utpkt_hdr(unsigned int hooknum,
     vpnid = vpninfo & VPNID_MASK;
     l3uniid = (vpninfo >> VPNID_BITS) & L3UNIID_MASK;
     peip = iph->saddr;
-    printk(KERN_INFO"vpnid =%d,l3uniid=%d,peip=%pI4\n",vpnid,l3uniid,&peip);
+    printk(KERN_INFO"vpnid=%d,l3uniid=%d,peip=%pI4\n",vpnid,l3uniid,&peip);
     ovstag = ut_vpncfg_get_qinq(vpnid,l3uniid,peip);
     printk(KERN_INFO"ovstag = %d\n",ovstag);
     skb_pull(skb,4);//vpninfo头
-    skb_reset_mac_header(skb);// 修改sk_buff的data指针后，需要进行此操作。
+    skb_reset_mac_header(skb);//修改sk_buff的data指针后，需要进行此操作。
     skb_reset_network_header(skb);
     printk(KERN_INFO"ne to controller common deal\n");
     print_linear_data(skb);
